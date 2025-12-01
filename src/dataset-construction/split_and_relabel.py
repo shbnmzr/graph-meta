@@ -1,33 +1,21 @@
 #!/usr/bin/env python3
 """
-Split, clean & relabel to 4 classes, with plasmid-host mapping
+Split, clean & relabel to 4 classes, with host–plasmid mapping
 
-Classes: prokaryote, eukaryote, plasmid, virus
+Classes: prokaryote, eukaryote, plasmid, viral
 
 Reads:
   <base_dir>/{train,val,test}/<category>/*.(fna|fa|fasta|*.gz)
 
 Writes per-record FASTAs:
-  <out_dir>/{train,val,test}/{prokaryote|eukaryote|plasmid|virus}/
+  <out_dir>/{train,val,test}/{prokaryote|eukaryote|plasmid|viral}/
 
 Writes manifest:
   <meta_root>/metadata/<category>_refs4_manifest.csv
   where meta_root = out_dir/.. if out_dir name == "refs4", else out_dir
 
-Writes host–plasmid map:
+Also writes host–plasmid map:
   <meta_root>/metadata/<category>_host_plasmids.json
-
-Flags:
-  --delete_source    delete original file after successful split (>=1 record written)
-  --trash_dir DIR    move original files here instead of deleting (overrides --delete_source)
-  --dry_run          do not write or delete/move anything; just log actions
-
-Usage:
-  python split_and_relabel.py \
-    --base_dir /path/to/my_dataset \
-    --out_dir  /path/to/my_dataset/refs4 \
-    --category bacteria \
-    --delete_source
 """
 
 import argparse
@@ -47,15 +35,17 @@ from Bio.Seq import Seq
 # CONFIG / CONSTANTS
 # ----------------------------------
 
+# Map taxonomic category → high-level class for chromosomal replicons
 CATEGORY_TO_DOMAIN = {
     "archaea": "prokaryote",
     "bacteria": "prokaryote",
     "fungi": "eukaryote",
     "protozoa": "eukaryote",
-    "virus": "virus",
+    "virus": "viral",
+    "viral": "viral",
 }
 
-# host assembly → { "chromosome_accessions": [...], "plasmids": {plasmid_acc: description} }
+# Store host ↔ plasmid/co-chromosome relationships
 HOST_MAP = defaultdict(lambda: {
     "chromosome_accessions": [],
     "plasmids": {}
@@ -76,15 +66,15 @@ def replicon_type(description: str) -> str:
     """
     Classify a replicon within an assembly:
       - 'plasmid'
-      - 'virus' (phage, viral, bacteriophage)
+      - 'viral' (phage, virus, viral, bacteriophage)
       - 'chromosomal'
       - 'unknown'
     """
     d = (description or "").lower()
 
-    # phage / viral
+    # viral replicons
     if any(w in d for w in ["phage", "virus", "viral", "bacteriophage"]):
-        return "virus"
+        return "viral"
 
     # plasmids
     if "plasmid" in d:
@@ -94,7 +84,6 @@ def replicon_type(description: str) -> str:
     if any(w in d for w in ["chromosome", "complete genome", "chromosomal"]):
         return "chromosomal"
 
-    # default
     return "unknown"
 
 
@@ -104,18 +93,22 @@ def class4_for_record(category: str, description: str) -> str:
       - prokaryote
       - eukaryote
       - plasmid
-      - virus
+      - viral
       - unknown
     """
     rtype = replicon_type(description)
+
     if rtype == "plasmid":
         return "plasmid"
-    if rtype == "virus":
-        return "virus"
+    if rtype == "viral":
+        return "viral"
 
+    # Chromosomal fallback
     dom = CATEGORY_TO_DOMAIN.get(category.lower())
-    if dom in {"prokaryote", "eukaryote", "virus"}:
+
+    if dom in {"prokaryote", "eukaryote", "viral"}:
         return dom
+
     return "unknown"
 
 
@@ -174,10 +167,7 @@ def process_file(
     keep_unknown: bool,
     dry_run: bool,
 ) -> int:
-    """
-    Process a single source FASTA file.
-    Returns number of records successfully written from this source file.
-    """
+
     written = 0
     assembly_id = sanitize_id(fpath.stem)  # e.g. GCA_000005825.2
 
@@ -190,20 +180,17 @@ def process_file(
             if cls == "unknown" and not keep_unknown:
                 continue
 
-            # Clean sequence: keep only A,C,G,T and drop short ones
+            # Cleaned sequence
             clean_seq = clean_sequence(str(rec.seq))
             if len(clean_seq) < 1000:
                 continue
 
-            # Update SeqRecord with cleaned sequence
             rec.seq = Seq(clean_seq)
 
-            # Track host–plasmid relationships
+            # Host-plasmid mapping
             if rtype == "plasmid":
-                # Try to extract plasmid label after the word "plasmid"
                 d_lower = desc.lower()
                 if "plasmid" in d_lower:
-                    # crude split; safe enough for later lookup
                     label_part = desc.split("plasmid", 1)[-1].strip()
                     plasmid_label = label_part if label_part else rec.id
                 else:
@@ -215,22 +202,19 @@ def process_file(
                 if rec.id not in HOST_MAP[assembly_id]["chromosome_accessions"]:
                     HOST_MAP[assembly_id]["chromosome_accessions"].append(rec.id)
 
-            # Prepare output directory
+            # Output directory
             out_cls_dir = out_dir / split / cls
             if not dry_run:
                 out_cls_dir.mkdir(parents=True, exist_ok=True)
 
-            src_stem = fpath.stem
             rec_id = sanitize_id(rec.id)
-            out_name = f"{src_stem}__{rec_id}.fna"
+            out_name = f"{fpath.stem}__{rec_id}.fna"
             out_path = out_cls_dir / out_name
 
-            if dry_run:
-                logging.info(f"[DRY] Would write {out_path}")
-            else:
+            if not dry_run:
                 SeqIO.write([rec], str(out_path), "fasta")
 
-            # Write manifest row
+            # Write manifest entry
             writer.writerow({
                 "split": split,
                 "category": category,
@@ -242,6 +226,7 @@ def process_file(
                 "path": str(out_path),
                 "source_file": str(fpath),
             })
+
             written += 1
 
     except Exception as e:
@@ -258,13 +243,9 @@ def delete_or_trash(fpath: Path, trash_dir: Optional[Path], dry_run: bool):
             logging.info(f"[DRY] Would move source → {dst}")
         else:
             shutil.move(str(fpath), str(dst))
-            logging.info(f"Moved source → {dst}")
     else:
-        if dry_run:
-            logging.info(f"[DRY] Would DELETE source {fpath}")
-        else:
+        if not dry_run:
             fpath.unlink(missing_ok=True)
-            logging.info(f"Deleted source {fpath}")
 
 
 def process_split_category(
@@ -277,7 +258,7 @@ def process_split_category(
     delete_source: bool,
     trash_dir: Optional[Path],
     dry_run: bool,
-) -> None:
+):
     in_dir = base_dir / split / category
     if not in_dir.exists():
         logging.warning(f"[{split}/{category}] directory not found: {in_dir}")
@@ -289,6 +270,7 @@ def process_split_category(
     for fpath in fasta_files:
         logging.info(f"Processing {fpath}")
         n = process_file(fpath, split, category, out_dir, writer, keep_unknown, dry_run)
+
         if n > 0 and (delete_source or trash_dir is not None):
             delete_or_trash(fpath, trash_dir, dry_run)
         elif n == 0:
@@ -303,20 +285,14 @@ def main():
     ap = argparse.ArgumentParser(
         description="Split, clean, and relabel FASTA records into 4 classes; optionally delete originals and record host–plasmid relationships."
     )
-    ap.add_argument("--base_dir", required=True, type=Path,
-                    help="Base dir with train/val/test/<category>/*")
-    ap.add_argument("--out_dir",  required=True, type=Path,
-                    help="Output dir for refs4/<split>/<class4>/")
+    ap.add_argument("--base_dir", required=True, type=Path)
+    ap.add_argument("--out_dir",  required=True, type=Path)
     ap.add_argument("--category", required=True,
-                    help="archaea | bacteria | fungi | protozoa | virus")
-    ap.add_argument("--keep_unknown", action="store_true",
-                    help="Keep records that cannot be classified")
-    ap.add_argument("--delete_source", action="store_true",
-                    help="Delete original file after successful split")
-    ap.add_argument("--trash_dir", type=Path, default=None,
-                    help="Move originals here instead of deleting")
-    ap.add_argument("--dry_run", action="store_true",
-                    help="Log actions without writing or deleting")
+                    help="archaea | bacteria | fungi | protozoa | virus | viral")
+    ap.add_argument("--keep_unknown", action="store_true")
+    ap.add_argument("--delete_source", action="store_true")
+    ap.add_argument("--trash_dir", type=Path, default=None)
+    ap.add_argument("--dry_run", action="store_true")
     ap.add_argument("--log_level", default="INFO",
                     choices=["DEBUG","INFO","WARNING","ERROR"])
     args = ap.parse_args()
@@ -327,20 +303,20 @@ def main():
     )
 
     cat = args.category.lower()
-    if cat not in {"archaea","bacteria","fungi","protozoa","virus"}:
+    if cat not in {"archaea", "bacteria", "fungi", "protozoa", "virus", "viral"}:
         raise SystemExit(f"Unsupported category: {args.category}")
 
-    # Decide metadata root
+    # Normalize category name
+    if cat == "virus":
+        cat = "viral"
+
+    # Manifest path
     meta_root = args.out_dir.parent if args.out_dir.name == "refs4" else args.out_dir
 
     manifest_path = meta_root / "metadata" / f"{cat}_refs4_manifest.csv"
     host_map_path = meta_root / "metadata" / f"{cat}_host_plasmids.json"
 
-    if args.dry_run:
-        logging.info(f"[DRY] Would write manifest to {manifest_path}")
-        logging.info(f"[DRY] Would write host–plasmid map to {host_map_path}")
-
-    # Open manifest (unless dry run)
+    # Open manifest unless dry run
     if args.dry_run:
         fh = None
         writer = None
@@ -348,12 +324,12 @@ def main():
         fh, writer = open_manifest(manifest_path)
 
     try:
-        for split in ["train","val","test"]:
+        for split in ["train", "val", "test"]:
             if args.dry_run:
-                # create a temporary no-op writer that just logs
                 class _Dummy:
-                    def writerow(self, row): logging.debug(f"[DRY] manifest row: {row}")
+                    def writerow(self, row): pass
                 writer = _Dummy()
+
             process_split_category(
                 base_dir=args.base_dir,
                 out_dir=args.out_dir,
@@ -368,14 +344,12 @@ def main():
     finally:
         if not args.dry_run and fh is not None:
             fh.close()
-            logging.info(f"Wrote manifest: {manifest_path}")
 
         # Write host–plasmid map
         if not args.dry_run:
             host_map_path.parent.mkdir(parents=True, exist_ok=True)
             with host_map_path.open("w") as f:
                 json.dump(HOST_MAP, f, indent=2)
-            logging.info(f"Wrote host–plasmid map: {host_map_path}")
 
 
 if __name__ == "__main__":
