@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Split, clean & relabel to 4 classes, with host–plasmid mapping
+Split, clean & relabel to 4 classes (with host–plasmid mapping)
 
 Classes: prokaryote, eukaryote, plasmid, viral
 
@@ -45,7 +45,7 @@ CATEGORY_TO_DOMAIN = {
     "viral": "viral",
 }
 
-# Store host ↔ plasmid/co-chromosome relationships
+# Store host↔plasmid/co-chromosome relationships
 HOST_MAP = defaultdict(lambda: {
     "chromosome_accessions": [],
     "plasmids": {}
