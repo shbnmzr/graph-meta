@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
 """
-Download and organize all Complete genomes from NCBI GenBank into train/val/test splits based on release dates.
+Download and organize GenBank genomes into train/val/test splits based solely on release dates.
+No sampling, no limits — all genomes are kept (unless --dev is used).
 
 Usage:
     python prepare_datasets.py \
         --category archaea \
         --train_cutoff 2021-12-31 \
-        --val_cutoff 2023-12-31 \
-        --test_end 2024-12-31 \
-        --base_dir ./my_dataset
+        --val_cutoff 2022-04-01 \
+        --test_end 2023-04-01 \
+        --base_dir ./my_dataset \
+        --dev
 """
 
 import argparse
@@ -35,12 +37,14 @@ logging.basicConfig(
     handlers=[logging.StreamHandler()]
 )
 
+
 # -----------------------------
 # HELPERS
 # -----------------------------
 def ensure_directories(*dirs: Path) -> None:
     for d in dirs:
         d.mkdir(parents=True, exist_ok=True)
+
 
 def download_text_file(url: str, dest: Path) -> None:
     for attempt in range(1, MAX_RETRIES + 1):
@@ -55,6 +59,7 @@ def download_text_file(url: str, dest: Path) -> None:
             time.sleep(RETRY_DELAY)
     raise RuntimeError(f"Failed to download {url} after {MAX_RETRIES} attempts.")
 
+
 # -----------------------------
 # PARSING FTP PATHS (NO SAMPLING)
 # -----------------------------
@@ -62,7 +67,6 @@ def parse_ftp_paths(summary_file: Path,
                     train_cutoff: datetime,
                     val_cutoff: datetime,
                     test_end: datetime) -> dict:
-
     with summary_file.open() as f:
         header = next(line for line in f if line.startswith("#assembly_accession")).strip().split("\t")
 
@@ -96,11 +100,13 @@ def parse_ftp_paths(summary_file: Path,
 
     return splits
 
+
 # -----------------------------
 # FILE HELPERS
 # -----------------------------
 def save_list_to_file(data: List[str], dest: Path) -> None:
     dest.write_text("\n".join(data))
+
 
 def is_valid_fasta(path: Path) -> bool:
     try:
@@ -109,11 +115,13 @@ def is_valid_fasta(path: Path) -> bool:
     except Exception:
         return False
 
+
 def has_valid_contig(path: Path, min_len=1000) -> bool:
     try:
         return any(len(rec.seq) >= min_len for rec in SeqIO.parse(path, "fasta"))
     except Exception:
         return False
+
 
 def download_file(url: str, dest_path: Path) -> bool:
     for attempt in range(1, MAX_RETRIES + 1):
@@ -133,6 +141,7 @@ def download_file(url: str, dest_path: Path) -> bool:
     logging.error(f"Failed to download {url} after {MAX_RETRIES} attempts.")
     return False
 
+
 def decompress_gz(gz_file: Path) -> bool:
     try:
         output_path = gz_file.with_suffix('')
@@ -150,12 +159,12 @@ def decompress_gz(gz_file: Path) -> bool:
         logging.warning(f"Failed to decompress {gz_file.name}: {e}")
         return False
 
+
 # -----------------------------
 # DOWNLOAD SPLITS
 # -----------------------------
 def download_split(split_name: str, entries: List[Tuple[str, datetime]],
                    output_dir: Path, metadata_dir: Path, category: str):
-
     logging.info(f"Downloading {split_name.upper()} genomes...")
     failed_urls = []
     ensure_directories(output_dir)
@@ -178,6 +187,7 @@ def download_split(split_name: str, entries: List[Tuple[str, datetime]],
     if failed_urls:
         save_list_to_file(failed_urls, metadata_dir / f"{category}_{split_name}_failed.txt")
 
+
 # -----------------------------
 # MAIN
 # -----------------------------
@@ -186,8 +196,8 @@ def main(category: str,
          train_cutoff: datetime,
          val_cutoff: datetime,
          test_end: datetime,
-         random_seed: int = None):
-
+         random_seed: int = None,
+         dev_mode: bool = False):
     if random_seed is not None:
         random.seed(random_seed)
 
@@ -205,6 +215,15 @@ def main(category: str,
     # Parse full sets of genomes (no sampling)
     dataset_entries = parse_ftp_paths(summary_file, train_cutoff, val_cutoff, test_end)
 
+    # ---------------------------------------------------------
+    # DEVELOPMENT MODE LOGIC
+    # ---------------------------------------------------------
+    if dev_mode:
+        logging.warning(">>> DEVELOPMENT MODE ACTIVE: Limiting to 100 genomes per split <<<")
+        for split in dataset_entries:
+            dataset_entries[split] = dataset_entries[split][:100]
+    # ---------------------------------------------------------
+
     for split in ["train", "val", "test"]:
         logging.info(f"{split.upper()}: {len(dataset_entries[split])} genomes")
         save_list_to_file(
@@ -218,14 +237,15 @@ def main(category: str,
 
     logging.info(f"Completed downloading and organizing datasets for category: {category}")
 
+
 # -----------------------------
 # CLI
 # -----------------------------
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Prepare GenBank genomes into train/val/test splits.")
+    parser = argparse.ArgumentParser(description="Prepare GenBank genomes into train/val/test splits (no sampling).")
     parser.add_argument("--category", required=True,
-                        help="Category (e.g., archaea, bacteria, viral, fungi, protozoa)")
-    parser.add_argument("--base_dir", default="./my_dataset",
+                        help="Category (e.g., archaea, bacteria, viral, plasmid, fungi, protozoa)")
+    parser.add_argument("--base_dir", default="./4CAC_dataset",
                         help="Base directory for storing data")
     parser.add_argument("--train_cutoff", required=True,
                         help="Date before which genomes go to TRAIN (YYYY-MM-DD)")
@@ -233,6 +253,10 @@ if __name__ == "__main__":
                         help="Date before which genomes go to VAL (YYYY-MM-DD)")
     parser.add_argument("--test_end", required=True,
                         help="Date before which genomes go to TEST (YYYY-MM-DD)")
+
+    parser.add_argument("--dev", action="store_true",
+                        help="Run in development mode (limit to 100 genomes per split for testing)")
+
     args = parser.parse_args()
 
     main(
@@ -241,4 +265,5 @@ if __name__ == "__main__":
         datetime.strptime(args.train_cutoff, "%Y-%m-%d"),
         datetime.strptime(args.val_cutoff, "%Y-%m-%d"),
         datetime.strptime(args.test_end, "%Y-%m-%d"),
+        dev_mode=args.dev
     )
