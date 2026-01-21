@@ -180,11 +180,9 @@ def process_file(
                 continue
 
             # Cleaned sequence
-            clean_seq = clean_sequence(str(rec.seq))
+            clean_seq = clean_sequence(rec.seq)
             if len(clean_seq) < 1000:
                 continue
-
-            rec.seq = Seq(clean_seq)
 
             # Host-plasmid mapping
             if rtype == "plasmid":
