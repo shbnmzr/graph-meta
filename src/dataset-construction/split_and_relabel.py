@@ -98,18 +98,13 @@ def class4_for_record(category: str, description: str) -> str:
     """
     rtype = replicon_type(description)
 
-    if rtype == "plasmid":
-        return "plasmid"
-    if rtype == "viral":
-        return "viral"
+    # Check description-based overrides
+    if rtype in {'plasmid', 'viral'}:
+        return rtype
 
-    # Chromosomal fallback
-    dom = CATEGORY_TO_DOMAIN.get(category.lower())
-
-    if dom in {"prokaryote", "eukaryote", "viral"}:
-        return dom
-
-    return "unknown"
+    # Check category-based mapping
+    # return 'unknown'  if missing
+    return CATEGORY_TO_DOMAIN.get(category.lower(), 'unknown')
 
 
 def sanitize_id(s: str) -> str:
