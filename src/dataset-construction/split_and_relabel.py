@@ -27,7 +27,7 @@ import re
 import shutil
 from collections import defaultdict
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Union
 from Bio import SeqIO
 from Bio.Seq import Seq
 
@@ -56,11 +56,15 @@ HOST_MAP = defaultdict(lambda: {
 # HELPERS
 # ----------------------------------
 
-def clean_sequence(seq: str) -> str:
+def clean_sequence(seq: Union[str, Seq]) -> Union[str, Seq]:
     """Uppercase and strip ambiguous bases. Keep only A,C,G,T."""
-    seq = seq.upper()
-    return "".join(b for b in seq if b in "ACGT")
+    seq_str = str(seq)
+    cleaned = re.sub(r'[^ACGT]', '', seq_str.upper())
 
+    if isinstance(seq, Seq):
+        return Seq(cleaned)
+
+    return cleaned
 
 def replicon_type(description: str) -> str:
     """
