@@ -1,7 +1,6 @@
 import os
 import shutil
 from pathlib import Path
-import glob
 import logging
 from tqdm.notebook import tqdm
 from typing import Tuple
