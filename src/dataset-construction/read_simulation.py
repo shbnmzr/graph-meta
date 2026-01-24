@@ -97,3 +97,12 @@ def run_simulation(split: 'str',
 
     logging.info(f'Simulation completed on {split}')
     logging.info(f'Outputs: {final_r1},  {final_r2}')
+
+
+def append_fastq(source: Path, dest: Path) -> None:
+    """
+    Appends source FASTQ content to destination FASTQ.
+    """
+    with open(dest, 'ab') as outfile:
+        with open(source, 'rb') as infile:
+            shutil.copyfileobj(infile, outfile)
