@@ -1,170 +1,204 @@
-import os
 import shutil
-from pathlib import Path
 import logging
-from tqdm.notebook import tqdm
-from typing import List
 import math
-from Bio import SeqIO
-from Bio.Seq import Seq
+import random
 import numpy as np
+from pathlib import Path
+from typing import List, Generator, Dict
+from Bio import SeqIO
+from tqdm.notebook import tqdm
+
+# Configure Logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s: %(message)s')
 
 
-def combine_references(split_dir: Path, output_fasta: Path) -> bool:
+def get_file_batches(files: List[Path],
+                     batch_size: int) -> Generator[List[Path], None, None]:
     """
-    Combines all the .fna files in a split into one fasta file
+    Generator that yields successive chunks of files.
     """
-    logging.info(f'[1/4] Combining references from {split_dir}...')
-
-    with open(output_fasta, 'w') as outfile:
-        files = list(split_dir.glob('**/*.fna'))
-        if not files:
-            logging.warning(f'No files found in {split_dir}')
-            return False
-
-        logging.info(f'Found {len(files)} genomes.')
-        with open(output_fasta, 'wb') as outfile:
-            for fname in tqdm(files, desc='Merging Genomes', unit='file'):
-                with open(fname, 'rb') as infile:
-                    shutil.copyfileobj(infile, outfile)
-
-                    outfile.write(b'\n')
+    for i in range(0, len(files), batch_size):
+        yield files[i: i + batch_size]
 
 
-        return True
+def merge_fasta_batch(files: List[Path], output_path: Path) -> None:
+    """
+    Merges a list of files into one temp fasta, renaming headers to ensure uniqueness.
+    Optimized to minimize memory usage during merge.
+    """
+    with open(output_path, 'w') as outfile:
+        for fname in files:
+            file_stem = fname.stem
+            try:
+                with open(fname, 'r') as infile:
+                    for line in infile:
+                        if line.startswith('>'):
+                            # Efficient string formatting
+                            clean_header = line.strip()[1:]
+                            outfile.write(f'>{file_stem}__{clean_header}\n')
+                        else:
+                            outfile.write(line)
+                # FIX 1: Correct newline character
+                outfile.write('\n')
+            except Exception as e:
+                logging.warning(f"Skipping corrupt file {fname}: {e}")
 
 
-def run_simulation(split: str,
-                   input_dir: Path,
-                   output_dir: Path,
-                   N_READS: int,
-                   BATCH_SIZE: int,
-                   DISTRIBUTION_MODE: str):
-    logging.info(f'--- Processing Split: {split.upper()} ---')
-    logging.info(f'[Scientific Mode: {DISTRIBUTION_MODE}] Simulating {N_READS} reads...')
+def calculate_read_counts(records: List,
+                          total_reads_target: int,
+                          mode: str = 'uniform') -> Dict[str, int]:
+    """
+    Distributes reads among records using vectorized numpy operations for speed.
+    """
+    # 1. Vectorize Lengths
+    lengths = np.array([len(rec.seq) for rec in records])
 
-    all_genomes = list(input_dir.rglob('*.fna'))
-    if not all_genomes: all_genomes = list(input_dir.rglob('*.fasta'))
+    if mode == 'uniform':
+        weights = lengths.astype(float)
+    elif mode == 'lognormal':
+        # Log-Normal (Mean=0, Sigma=1.0) is standard for metagenomic abundance
+        abundances = np.random.lognormal(mean=0, sigma=1.0, size=len(lengths))
+        weights = lengths * abundances
+    else:
+        raise ValueError(f"Unknown mode: {mode}")
 
-    if not all_genomes:
-        logging.warning(f'No genomes found in {input_dir}')
-        return
+    # 2. Normalize & Distribute
+    probs = weights / weights.sum()
+    read_counts = np.random.multinomial(total_reads_target, probs)
 
-    # Batching Setup
-    num_batches = math.ceil(len(all_genomes) / BATCH_SIZE)
-    reads_per_batch = max(1, int(N_READS / num_batches))
+    return {rec.id: count for rec, count in zip(records, read_counts)}
 
-    final_r1 = output_dir / 'simulated_R1.fastq'
-    final_r2 = output_dir / 'simulated_R2.fastq'
 
-    if final_r1.exists(): final_r1.unlink()
-    if final_r2.exists(): final_r2.unlink()
+def simulate_reads(records: List,
+                   r1_handle,
+                   r2_handle,
+                   read_counts_map: Dict[str, int],
+                   insert_size: int,
+                   read_len: int) -> None:
+    """
+    Shreds sequences into reads.
+    Optimized: Calculates invariant strings outside the loop.
+    """
+    # FIX 3: Pre-calculate Quality String once
+    qual_string = "I" * read_len
 
-    temp_dir = Path("/content/temp_scientific_work")
-    if temp_dir.exists(): shutil.rmtree(temp_dir)
-    temp_dir.mkdir(parents=True, exist_ok=True)
+    for record in records:
+        target_reads = read_counts_map[record.id]
+        seq = record.seq
+        seq_len = len(seq)
 
-    batch_iterator = get_file_batches(all_genomes, BATCH_SIZE)
-
-    for i, batch_files in enumerate(tqdm(batch_iterator, total=num_batches, desc=f'Simulating {split}')):
-
-        # 1. Prepare Batch File
-        batch_ref = temp_dir / 'batch_ref.fasta'
-        merge_fasta_batch(batch_files, batch_ref)
-
-        # 2. Parse Records into Memory (CRITICAL FIX)
-        # We must convert the File Path -> List of SeqRecords here
-        try:
-            with open(batch_ref) as f:
-                batch_records = list(SeqIO.parse(f, "fasta"))
-        except:
+        # Skip fragments shorter than insert size + buffer
+        if seq_len < insert_size + 50:
             continue
 
-        if not batch_records: continue
+        for _ in range(target_reads):
+            # 1. Select coordinates
+            start = random.randint(0, seq_len - insert_size)
+            end = start + insert_size
 
-        # 3. Calculate Distribution
-        read_counts = calculate_read_counts(batch_records, reads_per_batch, mode=DISTRIBUTION_MODE)
+            # 2. Extract fragment (Slicing is fast in BioPython)
+            fragment = seq[start:end]
 
-        # 4. Generate Reads
-        batch_r1 = temp_dir / f'batch_{i}_R1.fastq'
-        batch_r2 = temp_dir / f'batch_{i}_R2.fastq'
+            # 3. Generate Pairs
+            read1_seq = fragment[:read_len]
+            # reverse_complement() is the most expensive op here, but highly optimized in C by BioPython
+            read2_seq = fragment[-read_len:].reverse_complement()
 
-        with open(batch_r1, 'w') as f1, open(batch_r2, 'w') as f2:
-            simulate_reads(batch_records, f1, f2, read_counts)
+            # 4. Write to disk
+            # Using f-strings is slightly faster than concatenation
+            header = f"@{record.id}_{start}"
 
-        # 5. Append & Cleanup
-        if batch_r1.exists() and batch_r2.exists():
-            append_fastq(batch_r1, final_r1)
-            append_fastq(batch_r2, final_r2)
-
-        for f in temp_dir.iterdir(): f.unlink()
-
-    if temp_dir.exists(): temp_dir.rmdir()
-
-    logging.info(f'Simulation completed on {split}')
-    logging.info(f'Outputs: {final_r1}, {final_r2}')
+            r1_handle.write(f"{header}/1\n{read1_seq}\n+\n{qual_string}\n")
+            r2_handle.write(f"{header}/2\n{read2_seq}\n+\n{qual_string}\n")
 
 
 def append_fastq(source: Path, dest: Path) -> None:
     """
-    Appends source FASTQ content to destination FASTQ.
+    Appends source FASTQ content to destination FASTQ using binary stream (fastest copy).
     """
+    if not source.exists(): return
     with open(dest, 'ab') as outfile:
         with open(source, 'rb') as infile:
             shutil.copyfileobj(infile, outfile)
 
 
-def calculate_read_counts(records, total_reads_target, mode='uniform'):
-    """
-    Distributes the total_reads among records based on the chosen scientific mode.
-    Returns a dictionary: {record_id: num_reads}
-    """
-    lengths = np.array([len(rec.seq) for rec in records])
-    n = len(records)
+def run_simulation(split: str,
+                   input_dir: Path,
+                   output_dir: Path,
+                   n_reads: int,
+                   batch_size: int,
+                   distribution_mode: str,
+                   read_len: int = 150,
+                   insert_size: int = 400):
+    logging.info(f'--- Processing Split: {split.upper()} ---')
+    logging.info(f'[Mode: {distribution_mode}] Simulating {n_reads} reads...')
 
-    if mode == 'uniform':
-        # Probability is proportional to length (Equal Coverage)
-        weights = lengths.astype(float)
+    # 1. Find Genomes
+    all_genomes = list(input_dir.rglob('*.fna'))
+    if not all_genomes:
+        all_genomes = list(input_dir.rglob('*.fasta'))
 
-    elif mode == 'lognormal':
-        # Probability is Length * Abundance
-        # Draw abundances from Log-Normal (Mean=0, Sigma=1 is standard for metagenomics)
-        abundances = np.random.lognormal(mean=0, sigma=1.0, size=n)
-        weights = lengths * abundances
+    if not all_genomes:
+        logging.warning(f'No genomes found in {input_dir}')
+        return
 
-    else:
-        raise ValueError("Mode must be 'uniform' or 'lognormal'")
+    # 2. Setup Batching
+    num_batches = math.ceil(len(all_genomes) / batch_size)
+    reads_per_batch = max(1, int(n_reads / num_batches))
 
-    # Normalize weights to sum to 1
-    probs = weights / weights.sum()
+    # 3. Setup Outputs
+    final_r1 = output_dir / 'simulated_R1.fastq'
+    final_r2 = output_dir / 'simulated_R2.fastq'
+    if final_r1.exists(): final_r1.unlink()
+    if final_r2.exists(): final_r2.unlink()
 
-    # Distribute reads (Multinomial gives exact integers)
-    read_counts = np.random.multinomial(total_reads_target, probs)
+    # 4. Temp Directory (Local SSD for speed)
+    temp_dir = Path("/content/temp_scientific_work")
+    if temp_dir.exists(): shutil.rmtree(temp_dir)
+    temp_dir.mkdir(parents=True, exist_ok=True)
 
-    # Map back to record IDs
-    return {rec.id: count for rec, count in zip(records, read_counts)}
+    # 5. Execution Loop
+    batch_iterator = get_file_batches(all_genomes, batch_size)
 
+    try:
+        for i, batch_files in enumerate(tqdm(batch_iterator, total=num_batches, desc=f'Simulating {split}')):
 
-def merge_fasta_batch(files: List, output_path: Path) -> None:
-    """
-    Merges a small list of files into one temporary fasta
-    """
-    with open(output_path, 'w') as outfile:
-        for fname in files:
-            file_stem = fname.stem
-            with open(fname, 'r') as infile:
-                for line in infile:
-                    if line.startswith('>'):
-                        outfile.write(f'>{file_stem}__{line.strip()[1:]}\n')
-                    else:
-                        outfile.write(line)
+            # A. Merge Batch
+            batch_ref = temp_dir / 'batch_ref.fasta'
+            merge_fasta_batch(batch_files, batch_ref)
 
-            outfile.write('/n')
+            # B. Parse Records
+            try:
+                # list() loads batch into RAM
+                with open(batch_ref) as f:
+                    batch_records = list(SeqIO.parse(f, "fasta"))
+            except Exception as e:
+                logging.warning(f"Failed to parse batch {i}: {e}")
+                continue
 
+            if not batch_records: continue
 
-def get_file_batches(files: List, batch_size: int):
-    """
-    A generator that yields successive chinks of files
-    """
-    for i in range(0, len(files), batch_size):
-        yield files[i: i + batch_size]
+            # C. Calculate Counts
+            read_counts = calculate_read_counts(batch_records, reads_per_batch, mode=distribution_mode)
+
+            # D. Generate Reads
+            batch_r1 = temp_dir / f'batch_{i}_R1.fastq'
+            batch_r2 = temp_dir / f'batch_{i}_R2.fastq'
+
+            with open(batch_r1, 'w') as f1, open(batch_r2, 'w') as f2:
+                simulate_reads(batch_records, f1, f2, read_counts, insert_size, read_len)
+
+            # E. Append to Final
+            append_fastq(batch_r1, final_r1)
+            append_fastq(batch_r2, final_r2)
+
+            # F. Cleanup Batch
+            for f in temp_dir.iterdir():
+                f.unlink()
+
+    finally:
+        # cleanup even if error occurs
+        if temp_dir.exists(): shutil.rmtree(temp_dir)
+
+    logging.info(f'Simulation completed on {split}')
+    logging.info(f'Outputs: {final_r1}, {final_r2}')
