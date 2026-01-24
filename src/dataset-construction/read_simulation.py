@@ -3,7 +3,7 @@ import shutil
 from pathlib import Path
 import logging
 from tqdm.notebook import tqdm
-from typing import Tuple
+from typing import List
 import math
 
 
@@ -106,3 +106,20 @@ def append_fastq(source: Path, dest: Path) -> None:
     with open(dest, 'ab') as outfile:
         with open(source, 'rb') as infile:
             shutil.copyfileobj(infile, outfile)
+
+
+def merge_fasta_batch(files: List, output_path: Path) -> None:
+    """
+    Merges a small list of files into one temporary fasta
+    """
+    with open(output_path, 'w') as outfile:
+        for fname in files:
+            file_stem = fname.stem
+            with open(fname, 'r') as infile:
+                for line in infile:
+                    if line.startswith('>'):
+                        outfile.write(f'>{file_stem}__{line.strip()[1:]}\n')
+                    else:
+                        outfile.write(line)
+
+            outfile.write('/n')
