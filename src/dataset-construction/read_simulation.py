@@ -114,6 +114,37 @@ def append_fastq(source: Path, dest: Path) -> None:
             shutil.copyfileobj(infile, outfile)
 
 
+def calculate_read_counts(records, total_reads_target, mode='uniform'):
+    """
+    Distributes the total_reads among records based on the chosen scientific mode.
+    Returns a dictionary: {record_id: num_reads}
+    """
+    lengths = np.array([len(rec.seq) for rec in records])
+    n = len(records)
+
+    if mode == 'uniform':
+        # Probability is proportional to length (Equal Coverage)
+        weights = lengths.astype(float)
+
+    elif mode == 'lognormal':
+        # Probability is Length * Abundance
+        # Draw abundances from Log-Normal (Mean=0, Sigma=1 is standard for metagenomics)
+        abundances = np.random.lognormal(mean=0, sigma=1.0, size=n)
+        weights = lengths * abundances
+
+    else:
+        raise ValueError("Mode must be 'uniform' or 'lognormal'")
+
+    # Normalize weights to sum to 1
+    probs = weights / weights.sum()
+
+    # Distribute reads (Multinomial gives exact integers)
+    read_counts = np.random.multinomial(total_reads_target, probs)
+
+    # Map back to record IDs
+    return {rec.id: count for rec, count in zip(records, read_counts)}
+
+
 def merge_fasta_batch(files: List, output_path: Path) -> None:
     """
     Merges a small list of files into one temporary fasta
