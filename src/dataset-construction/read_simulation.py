@@ -7,7 +7,6 @@ from typing import List
 import math
 
 
-
 def combine_references(split_dir: Path, output_fasta: Path) -> bool:
     """
     Combines all the .fna files in a split into one fasta file
