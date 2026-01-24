@@ -123,3 +123,11 @@ def merge_fasta_batch(files: List, output_path: Path) -> None:
                         outfile.write(line)
 
             outfile.write('/n')
+
+
+def get_file_batches(files: List, batch_size: int):
+    """
+    A generator that yields successive chinks of files
+    """
+    for i in range(0, len(files), batch_size):
+        yield files[i: i + batch_size]
