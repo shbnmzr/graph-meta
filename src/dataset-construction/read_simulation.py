@@ -5,6 +5,9 @@ import logging
 from tqdm.notebook import tqdm
 from typing import List
 import math
+from Bio import SeqIO
+from Bio.Seq import Seq
+import numpy as np
 
 
 def combine_references(split_dir: Path, output_fasta: Path) -> bool:
@@ -31,29 +34,25 @@ def combine_references(split_dir: Path, output_fasta: Path) -> bool:
         return True
 
 
-def run_simulation(split: 'str',
+def run_simulation(split: str,
                    input_dir: Path,
                    output_dir: Path,
                    N_READS: int,
                    BATCH_SIZE: int,
-                   CORES: int) -> None:
-    """
-    Runs InSilicoSeq to generate paired-end reads
-    """
-    logging.info(f'[2 / 4] Simulating {N_READS} reads with InSilicoSeq...')
+                   DISTRIBUTION_MODE: str):
+    logging.info(f'--- Processing Split: {split.upper()} ---')
+    logging.info(f'[Scientific Mode: {DISTRIBUTION_MODE}] Simulating {N_READS} reads...')
 
-    all_genomes = list(input_dir.glob('**/*.fna'))
+    all_genomes = list(input_dir.rglob('*.fna'))
+    if not all_genomes: all_genomes = list(input_dir.rglob('*.fasta'))
 
     if not all_genomes:
         logging.warning(f'No genomes found in {input_dir}')
         return
 
+    # Batching Setup
     num_batches = math.ceil(len(all_genomes) / BATCH_SIZE)
-    reads_per_batch = int(N_READS / num_batches)
-
-    logging.info(f'Found {len(all_genomes)} genomes')
-    logging.info(f'Processing in {num_batches} batches of size {BATCH_SIZE} files.')
-    logging.info(f'Generating {reads_per_batch} reads per batch')
+    reads_per_batch = max(1, int(N_READS / num_batches))
 
     final_r1 = output_dir / 'simulated_R1.fastq'
     final_r2 = output_dir / 'simulated_R2.fastq'
@@ -61,41 +60,49 @@ def run_simulation(split: 'str',
     if final_r1.exists(): final_r1.unlink()
     if final_r2.exists(): final_r2.unlink()
 
-    temp_dir = output_dir / 'temp'
-    temp_dir.mkdir(exist_ok=True)
+    temp_dir = Path("/content/temp_scientific_work")
+    if temp_dir.exists(): shutil.rmtree(temp_dir)
+    temp_dir.mkdir(parents=True, exist_ok=True)
 
     batch_iterator = get_file_batches(all_genomes, BATCH_SIZE)
 
-    for i, batch_files in enumerate(tqdm(batch_iterator, total=num_batches, desc='Simulating Batches')):
+    for i, batch_files in enumerate(tqdm(batch_iterator, total=num_batches, desc=f'Simulating {split}')):
+
+        # 1. Prepare Batch File
         batch_ref = temp_dir / 'batch_ref.fasta'
         merge_fasta_batch(batch_files, batch_ref)
 
-        batch_out_prefix = temp_dir / f'batch_{i}'
-        iss_cmd = (f'iss generate --genomes {batch_ref}'
-                   f'--model miseq --n_reads {reads_per_batch}'
-                   f'--output {batch_out_prefix} --cpus {CORES}'
-                   )
-
-        exit_code = os.system(iss_cmd)
-        if exit_code != 0:
-            logging.warning(f'Batch {i} failed with exit code {exit_code}')
+        # 2. Parse Records into Memory (CRITICAL FIX)
+        # We must convert the File Path -> List of SeqRecords here
+        try:
+            with open(batch_ref) as f:
+                batch_records = list(SeqIO.parse(f, "fasta"))
+        except:
             continue
 
-        batch_r1 = batch_out_prefix / 'simulated_R1.fastq'
-        batch_r2 = batch_out_prefix / 'simulated_R2.fastq'
+        if not batch_records: continue
 
+        # 3. Calculate Distribution
+        read_counts = calculate_read_counts(batch_records, reads_per_batch, mode=DISTRIBUTION_MODE)
+
+        # 4. Generate Reads
+        batch_r1 = temp_dir / f'batch_{i}_R1.fastq'
+        batch_r2 = temp_dir / f'batch_{i}_R2.fastq'
+
+        with open(batch_r1, 'w') as f1, open(batch_r2, 'w') as f2:
+            simulate_reads(batch_records, f1, f2, read_counts)
+
+        # 5. Append & Cleanup
         if batch_r1.exists() and batch_r2.exists():
             append_fastq(batch_r1, final_r1)
             append_fastq(batch_r2, final_r2)
 
-        for f in temp_dir.glob('*'):
-            f.unlink()
+        for f in temp_dir.iterdir(): f.unlink()
 
-    if temp_dir.exists():
-        temp_dir.rmdir()
+    if temp_dir.exists(): temp_dir.rmdir()
 
     logging.info(f'Simulation completed on {split}')
-    logging.info(f'Outputs: {final_r1},  {final_r2}')
+    logging.info(f'Outputs: {final_r1}, {final_r2}')
 
 
 def append_fastq(source: Path, dest: Path) -> None:
