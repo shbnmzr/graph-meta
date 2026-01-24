@@ -4,6 +4,7 @@ from pathlib import Path
 import glob
 import logging
 from tqdm.notebook import tqdm
+from typing import Tuple
 
 
 def combine_references(split_dir: Path, output_fasta: Path) -> bool:
@@ -28,3 +29,21 @@ def combine_references(split_dir: Path, output_fasta: Path) -> bool:
 
 
         return True
+
+
+def read_simulation(combined_ref, out_dir: Path, N_READS: int, CORES: int) -> Tuple[Path, Path]:
+    """
+    Runs InSilicoSeq to generate paired-end reads
+    """
+    logging.info(f'[2 / 4] Simulating {N_READS} reads with InSilicoSeq...')
+
+    out_prefix = out_dir / 'simulated'
+
+    cmd = (f'iss generate --genome {combined_ref}'
+           f'--model miseq --n_reads {N_READS}'
+           f'--output {out_prefix} --cpus {CORES}')
+
+    if os.system(cmd) != 0:
+        raise RuntimeError('InSilicoSeq failed to generate reads')
+
+    return out_prefix.with_name('simulated_R1.fastq'), out_prefix.with_name('simulated_R2.fastq')
