@@ -38,7 +38,6 @@ def merge_fasta_batch(files: List[Path], output_path: Path) -> None:
                             outfile.write(f'>{file_stem}__{clean_header}\n')
                         else:
                             outfile.write(line)
-                # FIX 1: Correct newline character
                 outfile.write('\n')
             except Exception as e:
                 logging.warning(f"Skipping corrupt file {fname}: {e}")
@@ -79,7 +78,6 @@ def simulate_reads(records: List,
     Shreds sequences into reads.
     Optimized: Calculates invariant strings outside the loop.
     """
-    # FIX 3: Pre-calculate Quality String once
     qual_string = "I" * read_len
 
     for record in records:
@@ -96,16 +94,14 @@ def simulate_reads(records: List,
             start = random.randint(0, seq_len - insert_size)
             end = start + insert_size
 
-            # 2. Extract fragment (Slicing is fast in BioPython)
+            # 2. Extract fragment
             fragment = seq[start:end]
 
             # 3. Generate Pairs
             read1_seq = fragment[:read_len]
-            # reverse_complement() is the most expensive op here, but highly optimized in C by BioPython
             read2_seq = fragment[-read_len:].reverse_complement()
 
             # 4. Write to disk
-            # Using f-strings is slightly faster than concatenation
             header = f"@{record.id}_{start}"
 
             r1_handle.write(f"{header}/1\n{read1_seq}\n+\n{qual_string}\n")
