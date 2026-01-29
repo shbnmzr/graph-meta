@@ -46,3 +46,31 @@ def create_combined_reference(split_dir: Path, output_fasta: Path) -> bool:
             except:
                 continue
         return True
+
+
+def run_assembly(r1: Path, r2: Path, out_dir: Path):
+    """
+    Creates the De Novo Assembly graph using MEGAHIT
+    :param r1:
+    :param r2:
+    :param out_dir:
+    :return:
+    """
+    if out_dir.exists():
+        logging.info('Assembly directory already exists, removing to start fresh...')
+        shutil.rmtree(out_dir)
+
+    logging.info('Running MEGAHIT...')
+    cmd = MEGAHIT_CMD_TEMPLATE.format(r1=r1, r2=r2, out_dir=out_dir)
+
+    exit_code = os.system(cmd)
+    if exit_code != 0:
+        raise RuntimeError(f'MEGAHIT failed with exit code {exit_code}')
+
+    contigs = out_dir / 'final.contigs.fa'
+    graph = out_dir / 'final.gfa'
+
+    if not contigs.exists():
+        raise FileNotFoundError('MEGAHIT finished but no contigs files found')
+
+    return contigs, graph
