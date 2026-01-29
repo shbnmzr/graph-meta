@@ -74,3 +74,45 @@ def run_assembly(r1: Path, r2: Path, out_dir: Path):
         raise FileNotFoundError('MEGAHIT finished but no contigs files found')
 
     return contigs, graph
+
+
+def run_labeling(contigs: Path, ref_fasta: Path, output_csv: Path):
+    """
+    Maps contigs to reference genomes to establish the ground truth
+    """
+    paf_temp = output_csv.with_suffix('.paf')
+
+    # Run minimap2
+    logging.info('Mapping contigs to references using Minimap2...')
+    cmd = MINIMAP_CMD_TEMPLATE.format(ref=ref_fasta, query=contigs, paf_out=paf_temp)
+    os.system(cmd)
+
+    # Parse PAF to CSV
+    logging.info('Parsing mapping results...')
+
+    labels = []
+    if paf_temp.exists():
+        with open(paf_temp, 'r') as f:
+            for line in f:
+                parts = line.strip().split('\t')
+                if len(parts) < 6: continue
+
+                contig_id = parts[0]
+                ref_header = parts[5]
+
+                labels.append({
+                    'contig_id': contig_id,
+                    'ref_header': ref_header,
+                    'length': int(parts[1])
+                })
+        df = pd.DataFrame(labels)
+
+        df = df.sort_values(by='length', ascending=False).drop_duplicates('contig_id')
+        df.to_csv(output_csv, index=False)
+
+        logging.info(f'Labels saved to {output_csv} ({len(df)} contigs labeled)')
+
+        paf_temp.unlink()
+
+    else:
+        logging.warning('Minimap2 failed to generate output.')
